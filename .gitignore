@@ -1,0 +1,15 @@
+# 파이썬 바이트코드 캐시 제외
+__pycache__/
+*.pyc
+
+# 임시 생성 오디오 조각 및 보컬 정제 파일 제외
+temp_segments/
+*_vocal_temp.wav
+
+# 대용량 딥러닝 모델 가중치 파일 제외 (저장소 용량 과부하 방지)
+demucs4_htdemucs_cac.onnx
+demucs4_htdemucs_ft_cac_bass.onnx
+demucs4_htdemucs_ft_cac_drums.onnx
+demucs4_htdemucs_ft_cac_other.onnx
+demucs4_htdemucs_ft_cac_voice.onnx
+models/
