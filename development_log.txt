@@ -7,7 +7,7 @@ DiaScript 프로젝트 개발 및 디버깅 일지
 
 1.1. GPU 가속(NVIDIA RTX 5080) 병목 현상 완수 해결
 - 현상: CUDAExecutionProvider가 비활성화되어 CPU 사용량이 100%에 달하고 GPU가 과소 점유되는 Silent Fallback 문제 발생.
-- 원인: 내 윈도우 환경에서 CPU 전용 onnxruntime 패키지와 GPU용 onnxruntime-gpu 패키지가 충돌하여 경로가 꼬였음을 확인.
+- 원인: 윈도우 환경에서 CPU 전용 onnxruntime 패키지와 GPU용 onnxruntime-gpu 패키지가 충돌하여 경로가 꼬였음을 확인.
 - 조치: requirements.txt를 정밀 수정하고 충돌 패키지를 강제 언인스톨한 후, onnxruntime-gpu 단독 재배포를 완료하여 GPU 점유율 94%, CPU 4%의 강력한 하드웨어 가속 성능을 확보함.
 
 1.2. 윈도우 파일 잠금(Permission Error) 원천 차단 설계
