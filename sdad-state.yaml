@@ -1,0 +1,8 @@
+version: 2
+scale: standard
+active_packet:
+  id: "packet-gradio-migration"
+  description: "Gradio 파일 캐시(Errno 13) 에러 종식을 위한 마이그레이션"
+  owner_gates:
+    - "아키텍처 변경(Gradio Audio -> HTML 컴포넌트 전환)"
+current_handoff: "docs/sdad/handoffs/2026-07-14-gradio-migration.md"

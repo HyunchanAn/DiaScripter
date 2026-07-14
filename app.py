@@ -1,6 +1,8 @@
 import os
 import shutil
 import time
+import io
+import base64
 import soundfile as sf
 import librosa
 import numpy as np
@@ -10,10 +12,6 @@ from vocal_separator import VocalSeparator
 from speaker_diarizer import SpeakerDiarizer
 from transcriber import WhisperTranscriber
 
-# 임시 오디오 조각 파일들이 적재될 디렉토리 설정
-TEMP_SEG_DIR = os.path.abspath("./temp_segments").replace("\\", "/")
-os.makedirs(TEMP_SEG_DIR, exist_ok=True)
-
 # 전역 모듈 캐시 (중복 인스턴스화 및 리소스 낭비 원천 배제)
 MODEL_CACHE = {
     "separator": None,
@@ -22,25 +20,6 @@ MODEL_CACHE = {
     "last_separator_model": None,
     "last_whisper_model": None
 }
-
-def clear_temp_segments():
-    """
-    이전 실행에서 남은 임시 오디오 조각 세그먼트들을 안전하게 청소합니다.
-    윈도우 파일 락 오류를 피하기 위해 삭제 불가능한 파일은 무시하고 진행합니다.
-    """
-    if os.path.exists(TEMP_SEG_DIR):
-        for filename in os.listdir(TEMP_SEG_DIR):
-            file_path = os.path.join(TEMP_SEG_DIR, filename)
-            try:
-                if os.path.isfile(file_path) or os.path.islink(file_path):
-                    os.unlink(file_path)
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-            except Exception as e:
-                # 락이 걸린 개별 파일은 스킵하여 연산 실패 차단
-                pass
-    else:
-        os.makedirs(TEMP_SEG_DIR, exist_ok=True)
 
 def get_vocal_separator(model_path, use_gpu):
     if MODEL_CACHE["separator"] is None or MODEL_CACHE["last_separator_model"] != model_path:
@@ -146,15 +125,12 @@ def run_diarization_pipeline(vocal_path, no_gpu):
         inferred_k = diarizer.estimate_optimal_speakers(embeddings)
         print(f"[DEBUG LOG] Auto-detected K speakers: {inferred_k}")
         
-        # --- 임시 세그먼트 생성 및 플레이어 갱신 로직 일괄 처리 ---
-        clear_temp_segments()
-        
         # K-Means 군집화
         labels, centroids = diarizer.perform_clustering(embeddings, inferred_k)
         reps = diarizer.find_representative_segments(valid_segments, embeddings, labels, centroids, inferred_k)
         
-        # 8쌍의 gr.Audio 및 gr.Textbox 상태 리스트 준비 (최대 8명 지원)
-        ui_updates = []
+        html_blocks = []
+        ui_text_updates = []
         
         for i in range(8):
             if i < inferred_k:
@@ -162,24 +138,36 @@ def run_diarization_pipeline(vocal_path, no_gpu):
                 if rep_idx is not None:
                     seg = valid_segments[rep_idx]
                     seg_audio = y[seg["start_sample"]:seg["end_sample"]]
-                    # 윈도우 파일 락 방지 및 캐싱 안전을 위해 밀리초 타임스탬프 결합 경로 포워드슬래시 표준화
-                    temp_filename = os.path.join(TEMP_SEG_DIR, f"spk_{i + 1:02d}_{int(time.time() * 1000)}_sample.wav")
-                    temp_filename = temp_filename.replace("\\", "/")
-                    sf.write(temp_filename, seg_audio, sr)
+                    
+                    buffer = io.BytesIO()
+                    sf.write(buffer, seg_audio, sr, format='WAV', subtype='PCM_16')
+                    b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
                     
                     t_start = diarizer.format_timestamp(seg["start_time"])
                     t_end = diarizer.format_timestamp(seg["end_time"])
                     
-                    audio_update = gr.update(value=temp_filename, visible=True, label=f"Speaker_{i + 1:02d} 목소리 샘플 [{t_start} - {t_end}]")
+                    html_blocks.append(f"""
+                    <div style='margin-bottom: 10px; padding: 10px; background: #2a2a2b; border-radius: 8px;'>
+                        <strong style='color: #4da6ff;'>Speaker_{i + 1:02d}</strong> 목소리 샘플 [{t_start} - {t_end}]<br/>
+                        <audio controls style='width: 100%; margin-top: 5px;' src='data:audio/wav;base64,{b64_data}'></audio>
+                    </div>
+                    """)
                     text_update = gr.update(value=f"화자_{i + 1:02d}", visible=True, label=f"Speaker_{i + 1:02d} 실제 이름 매핑")
                 else:
-                    audio_update = gr.update(value=None, visible=True, label=f"Speaker_{i + 1:02d} 샘플 없음")
+                    html_blocks.append(f"""
+                    <div style='margin-bottom: 10px; padding: 10px; background: #2a2a2b; border-radius: 8px;'>
+                        <strong style='color: #ff4d4d;'>Speaker_{i + 1:02d}</strong> 샘플 없음
+                    </div>
+                    """)
                     text_update = gr.update(value=f"화자_{i + 1:02d}", visible=True, label=f"Speaker_{i + 1:02d} 실제 이름 매핑")
             else:
-                audio_update = gr.update(visible=False)
                 text_update = gr.update(visible=False)
                 
-            ui_updates.extend([audio_update, text_update])
+            ui_text_updates.append(text_update)
+            
+        final_html = "".join(html_blocks)
+        if not final_html:
+            final_html = "<div>표시할 화자 샘플이 없습니다.</div>"
             
         # 타임라인 생성
         timeline = []
@@ -193,16 +181,16 @@ def run_diarization_pipeline(vocal_path, no_gpu):
         timeline = sorted(timeline, key=lambda x: x["start"])
         print(f"[DEBUG LOG] Successfully generated timeline with {len(timeline)} events.")
         
-        # 최종 리턴값 매핑:
-        # [state_segments, state_embeddings, state_current_k, ui_speaker_count_slider, ui_status_label, state_timeline] + ui_updates (16개 상자)
+        # 최종 리턴값 매핑
         return (
             valid_segments,  # state_segments
             embeddings,      # state_embeddings
             inferred_k,      # state_current_k
             gr.update(value=inferred_k),  # ui_speaker_count_slider
             gr.update(value=f"알고리즘 1차 감지 화자 수: {inferred_k}명. 아래 샘플을 듣고 실시간 조율하십시오."),
-            timeline         # state_timeline
-        ) + tuple(ui_updates)
+            timeline,        # state_timeline
+            gr.update(value=final_html, visible=True) # ui_audio_html
+        ) + tuple(ui_text_updates)
         
     except Exception as e:
         import traceback
@@ -223,37 +211,50 @@ def run_recluster_pipeline(vocal_path, segments, embeddings, num_speakers, no_gp
     print(f"[DEBUG LOG] Reclustering speakers to: {num_speakers}")
     
     try:
-        clear_temp_segments()
-        
         labels, centroids = diarizer.perform_clustering(embeddings, num_speakers)
         reps = diarizer.find_representative_segments(segments, embeddings, labels, centroids, num_speakers)
         
         y, sr = librosa.load(vocal_path, sr=16000)
         
-        ui_updates = []
+        html_blocks = []
+        ui_text_updates = []
+        
         for i in range(8):
             if i < num_speakers:
                 rep_idx = reps.get(i)
                 if rep_idx is not None:
                     seg = segments[rep_idx]
                     seg_audio = y[seg["start_sample"]:seg["end_sample"]]
-                    temp_filename = os.path.join(TEMP_SEG_DIR, f"spk_{i + 1:02d}_{int(time.time() * 1000)}_sample.wav")
-                    temp_filename = temp_filename.replace("\\", "/")
-                    sf.write(temp_filename, seg_audio, sr)
+                    
+                    buffer = io.BytesIO()
+                    sf.write(buffer, seg_audio, sr, format='WAV', subtype='PCM_16')
+                    b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
                     
                     t_start = diarizer.format_timestamp(seg["start_time"])
                     t_end = diarizer.format_timestamp(seg["end_time"])
                     
-                    audio_update = gr.update(value=temp_filename, visible=True, label=f"Speaker_{i + 1:02d} 목소리 샘플 [{t_start} - {t_end}]")
+                    html_blocks.append(f"""
+                    <div style='margin-bottom: 10px; padding: 10px; background: #2a2a2b; border-radius: 8px;'>
+                        <strong style='color: #4da6ff;'>Speaker_{i + 1:02d}</strong> 목소리 샘플 [{t_start} - {t_end}]<br/>
+                        <audio controls style='width: 100%; margin-top: 5px;' src='data:audio/wav;base64,{b64_data}'></audio>
+                    </div>
+                    """)
                     text_update = gr.update(value=f"화자_{i + 1:02d}", visible=True, label=f"Speaker_{i + 1:02d} 실제 이름 매핑")
                 else:
-                    audio_update = gr.update(value=None, visible=True, label=f"Speaker_{i + 1:02d} 샘플 없음")
+                    html_blocks.append(f"""
+                    <div style='margin-bottom: 10px; padding: 10px; background: #2a2a2b; border-radius: 8px;'>
+                        <strong style='color: #ff4d4d;'>Speaker_{i + 1:02d}</strong> 샘플 없음
+                    </div>
+                    """)
                     text_update = gr.update(value=f"화자_{i + 1:02d}", visible=True, label=f"Speaker_{i + 1:02d} 실제 이름 매핑")
             else:
-                audio_update = gr.update(visible=False)
                 text_update = gr.update(visible=False)
                 
-            ui_updates.extend([audio_update, text_update])
+            ui_text_updates.append(text_update)
+            
+        final_html = "".join(html_blocks)
+        if not final_html:
+            final_html = "<div>표시할 화자 샘플이 없습니다.</div>"
             
         timeline = []
         for idx, seg in enumerate(segments):
@@ -265,8 +266,7 @@ def run_recluster_pipeline(vocal_path, segments, embeddings, num_speakers, no_gp
             })
         timeline = sorted(timeline, key=lambda x: x["start"])
         
-        # [audio_boxes + text_boxes] (16개) + state_timeline (1개) 형식 리턴
-        return tuple(ui_updates) + (timeline,)
+        return (gr.update(value=final_html, visible=True),) + tuple(ui_text_updates) + (timeline,)
         
     except Exception as e:
         import traceback
@@ -453,16 +453,13 @@ def create_ui():
                         
                     gr.Markdown("#### 아래 각 화자별 대표 발화 샘플의 재생 단추를 눌러 목소리를 판별하고 한글 이름을 입력해 주십시오.")
                     
-                    # 최대 8쌍의 오디오 플레이어 + 텍스트 입력창 고정 배치 (동적 가시화 기법 구현)
-                    audio_boxes = []
-                    text_boxes = []
-                    
-                    for i in range(8):
-                        with gr.Row(equal_height=True, variant="compact") as row:
-                            with gr.Column(scale=2):
-                                aud = gr.Audio(label=f"Speaker_{i + 1:02d} 목소리", visible=False, interactive=False)
-                                audio_boxes.append(aud)
-                            with gr.Column(scale=1):
+                    # 단일 HTML 컴포넌트를 이용한 오디오 플레이어 서빙 (Errno 13 원천 차단)
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            ui_audio_html = gr.HTML(visible=False)
+                        with gr.Column(scale=1):
+                            text_boxes = []
+                            for i in range(8):
                                 txt = gr.Textbox(label=f"Speaker_{i + 1:02d} 이름", visible=False, value=f"화자_{i + 1:02d}")
                                 text_boxes.append(txt)
                                 
@@ -504,21 +501,21 @@ def create_ui():
         ).then(
             fn=run_diarization_pipeline,
             inputs=[state_vocal_path, no_gpu],
-            outputs=[state_segments, state_embeddings, state_current_k, ui_speaker_count_slider, ui_status_label, state_timeline] + audio_boxes + text_boxes
+            outputs=[state_segments, state_embeddings, state_current_k, ui_speaker_count_slider, ui_status_label, state_timeline, ui_audio_html] + text_boxes
         )
         
         # 2. 2단계 [화자 분리 연산 시작] 버튼 바인딩 (단일 오케스트레이션 구동으로 deepcopy 원천 근절)
         btn_start_diarization.click(
             fn=run_diarization_pipeline,
             inputs=[state_vocal_path, no_gpu],
-            outputs=[state_segments, state_embeddings, state_current_k, ui_speaker_count_slider, ui_status_label, state_timeline] + audio_boxes + text_boxes
+            outputs=[state_segments, state_embeddings, state_current_k, ui_speaker_count_slider, ui_status_label, state_timeline, ui_audio_html] + text_boxes
         )
         
         # 3. 2단계 [화자 수 재조정 반영] 버튼 바인딩 (통합 캐시 기반 0.1초 갱신)
         btn_recluster.click(
             fn=run_recluster_pipeline,
             inputs=[state_vocal_path, state_segments, state_embeddings, ui_speaker_count_slider, no_gpu],
-            outputs=audio_boxes + text_boxes + [state_timeline]
+            outputs=[ui_audio_html] + text_boxes + [state_timeline]
         ).then(
             fn=lambda k: gr.Info(f"화자 수를 {k}명으로 재조정하여 군집 배치를 완료하였습니다."),
             inputs=[ui_speaker_count_slider]
@@ -540,9 +537,6 @@ def create_ui():
     return demo
 
 if __name__ == "__main__":
-    # 임시 세그먼트 디렉토리 초기 청소
-    clear_temp_segments()
-    
     ui_app = create_ui()
     # 로컬 네트워크 공유 기본 비활성화, 로컬 포트 7860 바인딩 실행
     ui_app.launch(
