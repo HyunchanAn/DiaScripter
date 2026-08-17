@@ -1,6 +1,6 @@
 # DiaScript
 
-![Status](https://img.shields.io/badge/Status-v1.0-brightgreen) ![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Backend](https://img.shields.io/badge/Backend-ONNX%20%7C%20Faster--Whisper-red) ![UI](https://img.shields.io/badge/UI-Gradio-orange)
+![Status](https://img.shields.io/badge/Status-v1.0%20Release-brightgreen "Status") ![Python](https://img.shields.io/badge/Python-3.10%2B-blue "Python") ![Backend](https://img.shields.io/badge/Backend-ONNX%20%7C%20Faster--Whisper-red "Backend") ![UI](https://img.shields.io/badge/UI-Gradio-orange "UI")
 
 DiaScript는 대용량 동영상 및 음성 파일에서 배경음악(BGM)과 잡음을 제거하고, 인공지능 기반으로 화자를 분리하여 이름을 매핑한 뒤, 최종 전사 스크립트 및 자막 파일(SRT)을 자동 생성하는 고성능 파이썬 프로그램입니다.
 
@@ -157,8 +157,7 @@ python app.py
 - SpeechBrain 화자 인식 가중치 파일은 최초 1회 다운로드를 위해 인터넷이 필요합니다.
 - 만약 군망이나 격리된 오프라인 환경 등 네트워크 단절 상태인 경우, 본 프로그램은 예외 상황을 감지하고 내장된 MFCC 특징 주성분 분석 Fallback 알고리즘으로 100% 자동 선회하여 화자를 분리하므로 중단 없이 처리를 지속할 수 있습니다.
 
-3. 윈도우 환경 Gradio 파일 캐시 권한 거부 오류 (Errno 13) 및 디버깅 강화
-- 윈도우 운영체제의 파일 시스템과 Gradio 프레임워크 고유의 임시 파일 캐싱/이송기 간의 충돌로 인해 간헐적인 Permission denied 에러가 발생할 수 있습니다.
-- 본 프로그램은 이러한 윈도우 런타임 캐시 오류를 완벽히 모니터링하고 박멸하기 위해 백엔드 로직에 디버깅 강화 추적 시스템을 탑재하였습니다.
-- 연산 중 예외가 발생할 경우, 브라우저 화면의 에러 토스트 팝업창에 예외가 발생한 정확한 파이썬 소스코드 라인 넘버와 백트레이스 정보가 상세하게 노출되도록 강인화되었습니다.
-- 향후 디버깅 로깅 시스템의 고도화를 지속할 예정이며, 파일 캐싱 충돌이 지속될 경우 8쌍의 오디오 컴포넌트 구조를 단 하나의 gr.HTML 컴포넌트와 전용 파일 스트리밍 라우터 서빙 아키텍처로 통째로 마이그레이션하여 캐싱 시스템의 권한 잠금 오류를 물리적으로 원천 종식시키는 패치를 순차 적용할 계획입니다.
+3. 윈도우 환경 Gradio 파일 캐시 권한 거부 오류 (Errno 13) 원천 해결
+- 기존에는 윈도우 운영체제의 파일 시스템과 Gradio 프레임워크 고유의 임시 파일 캐싱 메커니즘 간의 충돌로 인해 간헐적인 Permission denied 에러가 발생했습니다.
+- 이를 영구적으로 종식시키기 위해, 최신 버전에서는 디스크 파일 I/O 로직을 완전히 폐기하고 [Base64 인라인 메모리 인코딩] 방식을 전격 도입했습니다.
+- 8쌍의 개별 오디오 컴포넌트 대신 단 하나의 gr.HTML 컴포넌트를 사용하여 메모리 상에서 직접 오디오 데이터를 스트리밍 렌더링하므로, 캐싱 시스템의 권한 잠금 오류가 물리적으로 발생할 수 없도록 아키텍처 개선이 완료되었습니다.
