@@ -1,5 +1,26 @@
 import os
+import glob
+
+# PyTorch를 먼저 임포트해야 torch.lib 경로를 얻을 수 있습니다.
 import torch
+
+try:
+    if hasattr(os, "add_dll_directory"):
+        # 1. PyTorch 자체의 lib 디렉토리를 가장 먼저 추가 (cuDNN 충돌 방지 및 PyTorch 내장 cuDNN 9 사용)
+        torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+        if os.path.exists(torch_lib):
+            os.add_dll_directory(torch_lib)
+            os.environ["PATH"] = torch_lib + os.pathsep + os.environ.get("PATH", "")
+            
+    import site
+    for s in site.getsitepackages() + [site.getusersitepackages()]:
+        for nvidia_dir in glob.glob(os.path.join(s, "nvidia", "*", "bin")):
+            if os.path.exists(nvidia_dir):
+                if hasattr(os, "add_dll_directory"):
+                    os.add_dll_directory(nvidia_dir)
+                os.environ["PATH"] = nvidia_dir + os.pathsep + os.environ.get("PATH", "")
+except Exception:
+    pass
 from faster_whisper import WhisperModel
 
 class WhisperTranscriber:
@@ -22,7 +43,7 @@ class WhisperTranscriber:
 
     def match_speaker(self, seg_start, seg_end, timeline, names_map):
         """
-        Whisper 전사 세그먼트와 가장 많이 겹치는(Overlap) 화자 이름을 타임라인 데이터를 참조하여 찾아냅/니다.
+        Whisper 전사 세그먼트와 가장 많이 겹치는(Overlap) 화자 이름을 타임라인 데이터를 참조하여 찾아냅니다.
         """
         best_speaker = None
         max_overlap = 0.0
@@ -34,6 +55,7 @@ class WhisperTranscriber:
                 max_overlap = overlap
                 best_speaker = t_seg["speaker"]
                 
+        warning_tag = ""
         # 2순위: 겹치는 구간이 전혀 없는 경우, 세그먼트 중간 시점과 가장 근접한 화자 탐색
         if best_speaker is None and timeline:
             seg_mid = (seg_start + seg_end) / 2.0
@@ -46,9 +68,13 @@ class WhisperTranscriber:
                     min_dist = dist
                     best_speaker = t_seg["speaker"]
                     
+            # ⚠️ 싱크 틀어짐 감지: 겹침 구간이 전혀 없고, 가장 가까운 화자와의 거리가 2초를 초과할 경우
+            if min_dist > 2.0:
+                warning_tag = "[⚠️싱크경고] "
+                    
         # 최종 이름 치환 (이름 맵에 없으면 기본 화자 ID 유지)
         speaker_name = names_map.get(best_speaker, best_speaker if best_speaker else "알 수 없는 화자")
-        return speaker_name
+        return warning_tag + speaker_name
 
     def format_time_txt(self, seconds):
         """
@@ -69,12 +95,12 @@ class WhisperTranscriber:
         ms = int((seconds - int(seconds)) * 1000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-    def transcribe_and_align(self, vocal_audio_path, timeline, names_map, language_mode="ko"):
+    def transcribe_and_align_generator(self, vocal_audio_path, timeline, names_map, language_mode="ko"):
         """
-        보컬 트랙에 대해 전사를 실행하고, 화자를 매핑한 스크립트 데이터를 생성합니다.
+        보컬 트랙에 대해 전사를 실행하고, 화자를 매핑하여 실시간으로 텍스트를 스트리밍(yield)합니다.
         language_mode: 'ko' (한국어 고정), 'auto' (자동 감지)
         """
-        print(f"[음성 인식] 음성 전사(Transcription)를 시작합니다. (언어 모드: {language_mode})")
+        print(f"[음성 인식] 음성 전사(Transcription) 실시간 스트리밍을 시작합니다. (언어 모드: {language_mode})")
         
         # 언어 매개변수 바인딩 (기본 한국어 고정 / auto 설정 시 자동 감지)
         lang_param = "ko" if language_mode == "ko" else None
@@ -92,15 +118,18 @@ class WhisperTranscriber:
             print(f"[음성 인식] 자동 감지된 언어: {info.language} (신뢰도: {info.language_probability:.2f})")
             
         aligned_segments = []
+        current_txt = ""
+        current_srt = ""
+        idx = 0
         
-        # segments는 generator이므로 순회하며 리스트화
+        # segments는 generator이므로 순회하며 실시간 UI 갱신 데이터 방출
         for segment in segments:
             # 텍스트 양 끝 공백 제거
             text = segment.text.strip()
             if not text:
                 continue
                 
-            # 화자 매칭 수행
+            # 화자 매칭 수행 (싱크 이탈 시 ⚠️싱크경고 태그 포함 반환)
             speaker_name = self.match_speaker(segment.start, segment.end, timeline, names_map)
             
             aligned_segments.append({
@@ -110,8 +139,21 @@ class WhisperTranscriber:
                 "text": text
             })
             
-        print(f"[음성 인식] 전사 완료. 총 {len(aligned_segments)}개의 발화 자막 세그먼트 생성됨.")
-        return aligned_segments
+            # 누적 텍스트 및 자막 포맷팅
+            t_start_txt = self.format_time_txt(segment.start)
+            t_end_txt = self.format_time_txt(segment.end)
+            current_txt += f"[{t_start_txt} - {t_end_txt}] {speaker_name}: {text}\n"
+            
+            t_start_srt = self.format_time_srt(segment.start)
+            t_end_srt = self.format_time_srt(segment.end)
+            current_srt += f"{idx + 1}\n{t_start_srt} --> {t_end_srt}\n[{speaker_name}] {text}\n\n"
+            
+            idx += 1
+            
+            # 실시간으로 누적된 텍스트와 현재까지의 세그먼트 배열을 방출
+            yield current_txt, current_srt, aligned_segments
+            
+        print(f"[음성 인식] 전사 스트리밍 완료. 총 {len(aligned_segments)}개의 발화 자막 세그먼트 생성됨.")
 
     def save_results(self, aligned_segments, base_output_path):
         """
